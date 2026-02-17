@@ -7,7 +7,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from wsgiref.simple_server import make_server, WSGIRequestHandler
 
 # ── Credenciais do app ────────────────────────────────────────
-USER_NAME = "edy"
+USER_NAME = "Edy"
 USER_PASS  = "tor12.nado"
 
 # ── Configuração Supabase ─────────────────────────────────────
