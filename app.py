@@ -4,7 +4,6 @@ import urllib.error
 import json
 import os
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from wsgiref.simple_server import make_server, WSGIRequestHandler
 
 # ── Credenciais do app ────────────────────────────────────────
 USER_NAME = "Edy"
@@ -43,6 +42,21 @@ def get_notas():
 
 def add_nota(titulo, conteudo):
     return sb_request("POST", "notas", {"titulo": titulo, "conteudo": conteudo})
+
+def update_nota(nota_id, titulo, conteudo):
+    """Atualiza titulo e conteudo de uma nota existente via PATCH."""
+    url  = f"{SUPABASE_URL}/rest/v1/notas?id=eq.{nota_id}"
+    body = json.dumps({"titulo": titulo, "conteudo": conteudo}).encode()
+    req  = urllib.request.Request(url, data=body, headers=HEADERS, method="PATCH")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return True
+    except urllib.error.HTTPError as e:
+        print(f"[Supabase update erro {e.code}]: {e.read().decode()}")
+        return False
+    except Exception as e:
+        print(f"[Supabase update erro]: {e}")
+        return False
 
 def delete_nota(nota_id):
     url = f"{SUPABASE_URL}/rest/v1/notas?id=eq.{nota_id}"
@@ -114,16 +128,27 @@ def build_notes_page(notas, msg=""):
             nid      = n.get("id", "")
             titulo   = (n.get("titulo") or "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
             conteudo = (n.get("conteudo") or "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+            # Versões para preencher o modal (sem escapar &amp; duplo)
+            titulo_js   = (n.get("titulo")   or "").replace("\\","\\\\").replace("`","\\`").replace("$","\\$")
+            conteudo_js = (n.get("conteudo") or "").replace("\\","\\\\").replace("`","\\`").replace("$","\\$")
             data_raw = n.get("criada_em", "")[:16].replace("T", " ")
             cards += f"""<div class="note-card">
               <div class="note-card-title">{titulo}</div>
               <div class="note-card-body">{conteudo}</div>
-              <div class="note-meta"><span>{data_raw}</span>
-                <form method="POST" action="/delete" style="display:inline">
-                  <input type="hidden" name="id" value="{nid}">
-                  <button class="btn-del" type="submit">&#10005; apagar</button>
-                </form>
-              </div></div>"""
+              <div class="note-meta">
+                <span>{data_raw}</span>
+                <div class="note-actions">
+                  <button class="btn-edit" type="button"
+                    onclick="openEdit('{nid}', `{titulo_js}`, `{conteudo_js}`)">
+                    &#9998; editar
+                  </button>
+                  <form method="POST" action="/delete" style="display:inline">
+                    <input type="hidden" name="id" value="{nid}">
+                    <button class="btn-del" type="submit">&#10005; apagar</button>
+                  </form>
+                </div>
+              </div>
+            </div>"""
 
     msg_html = f'<div class="toast">{msg}</div>' if msg else ""
     count = len(notas)
@@ -164,9 +189,59 @@ def build_notes_page(notas, msg=""):
   .note-card-title {{ font-family:var(--ft); font-size:.97rem; font-weight:700; margin-bottom:9px; word-break:break-word; color:var(--text); }}
   .note-card-body {{ font-size:.76rem; color:#9898b8; line-height:1.75; word-break:break-word; white-space:pre-wrap; }}
   .note-meta {{ font-size:.62rem; color:var(--muted); margin-top:13px; padding-top:9px; border-top:1px solid var(--border); display:flex; justify-content:space-between; align-items:center; }}
-  .btn-del {{ background:none; border:none; color:var(--muted); cursor:pointer; font-size:.7rem; font-family:var(--fb); padding:2px 6px; border-radius:5px; transition:color .18s,background .18s; }}
+  .note-actions {{ display:flex; gap:4px; align-items:center; }}
+  .btn-del {{ background:none; border:none; color:var(--muted); cursor:pointer; font-size:.7rem; font-family:var(--fb); padding:3px 7px; border-radius:5px; transition:color .18s,background .18s; }}
   .btn-del:hover {{ color:#ff7070; background:rgba(255,70,70,.1); }}
+  .btn-edit {{ background:none; border:none; color:var(--muted); cursor:pointer; font-size:.7rem; font-family:var(--fb); padding:3px 7px; border-radius:5px; transition:color .18s,background .18s; }}
+  .btn-edit:hover {{ color:var(--accent2); background:rgba(110,76,255,.15); }}
   .empty {{ grid-column:1/-1; text-align:center; color:var(--muted); font-size:.78rem; padding:52px 0; letter-spacing:.08em; }}
+
+  /* ── Modal de edição ── */
+  .modal-overlay {{
+    display:none; position:fixed; inset:0; z-index:200;
+    background:rgba(10,10,15,.82); backdrop-filter:blur(6px);
+    align-items:center; justify-content:center;
+  }}
+  .modal-overlay.open {{ display:flex; animation:fadeIn .2s ease; }}
+  @keyframes fadeIn {{ from{{opacity:0}} to{{opacity:1}} }}
+  .modal {{
+    background:var(--surface); border:1px solid var(--border);
+    border-radius:18px; padding:32px 28px 26px;
+    width:480px; max-width:94vw; position:relative;
+    box-shadow:0 0 80px rgba(110,76,255,.3), 0 28px 56px rgba(0,0,0,.8);
+    animation:slideUp .28s cubic-bezier(.22,1,.36,1);
+  }}
+  @keyframes slideUp {{ from{{transform:translateY(24px);opacity:0}} to{{transform:translateY(0);opacity:1}} }}
+  .modal::before {{
+    content:''; position:absolute; top:-1px; left:32px; right:32px;
+    height:3px; background:linear-gradient(90deg,var(--accent2),var(--accent));
+    border-radius:0 0 4px 4px;
+  }}
+  .modal-title {{
+    font-family:var(--ft); font-size:1.05rem; font-style:italic;
+    color:var(--muted); margin-bottom:18px;
+  }}
+  .modal-close {{
+    position:absolute; top:16px; right:18px;
+    background:none; border:none; color:var(--muted);
+    font-size:1.1rem; cursor:pointer; line-height:1;
+    transition:color .18s;
+  }}
+  .modal-close:hover {{ color:var(--text); }}
+  .modal-row {{ display:flex; gap:10px; justify-content:flex-end; margin-top:14px; }}
+  .btn-cancel {{
+    background:none; border:1px solid var(--border); border-radius:10px;
+    padding:9px 20px; color:var(--muted); font-family:var(--fb);
+    font-size:.76rem; cursor:pointer; transition:border-color .18s,color .18s;
+  }}
+  .btn-cancel:hover {{ border-color:var(--text); color:var(--text); }}
+  .btn-save {{
+    background:var(--accent2); color:#fff; border:none; border-radius:10px;
+    padding:9px 22px; font-family:var(--fb); font-size:.76rem; font-weight:700;
+    letter-spacing:.08em; text-transform:uppercase; cursor:pointer;
+    transition:transform .15s,box-shadow .15s;
+  }}
+  .btn-save:hover {{ transform:translateY(-2px); box-shadow:0 8px 22px rgba(110,76,255,.4); }}
 </style>
 </head>
 <body>
@@ -187,6 +262,46 @@ def build_notes_page(notas, msg=""):
   <div class="section-title">Notas salvas ({count})</div>
   <div class="notes-grid">{cards}</div>
 </main>
+
+<!-- ── Modal de edição ── -->
+<div class="modal-overlay" id="editOverlay">
+  <div class="modal">
+    <button class="modal-close" onclick="closeEdit()">&#10005;</button>
+    <div class="modal-title">&#9998; Editar nota</div>
+    <form method="POST" action="/edit">
+      <input type="hidden" name="id" id="editId">
+      <input class="note-title-input" type="text" name="titulo" id="editTitulo"
+             placeholder="Titulo..." maxlength="80">
+      <textarea name="conteudo" id="editConteudo"
+                placeholder="Conteudo..."></textarea>
+      <div class="modal-row">
+        <button class="btn-cancel" type="button" onclick="closeEdit()">Cancelar</button>
+        <button class="btn-save" type="submit">&#10003; Salvar</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script>
+  function openEdit(id, titulo, conteudo) {{
+    document.getElementById('editId').value      = id;
+    document.getElementById('editTitulo').value  = titulo;
+    document.getElementById('editConteudo').value = conteudo;
+    document.getElementById('editOverlay').classList.add('open');
+    document.getElementById('editTitulo').focus();
+  }}
+  function closeEdit() {{
+    document.getElementById('editOverlay').classList.remove('open');
+  }}
+  // Fecha ao clicar fora do modal
+  document.getElementById('editOverlay').addEventListener('click', function(e) {{
+    if (e.target === this) closeEdit();
+  }});
+  // Fecha com Esc
+  document.addEventListener('keydown', function(e) {{
+    if (e.key === 'Escape') closeEdit();
+  }});
+</script>
 </body></html>"""
 
 # ── App WSGI (compatível com gunicorn) ────────────────────────
@@ -243,6 +358,18 @@ def application(environ, start_response):
             notas = get_notas()
             return respond(build_notes_page(notas, msg))
 
+        elif path == "/edit":
+            nota_id  = params.get("id",       [""])[0].strip()
+            titulo   = params.get("titulo",   [""])[0].strip()
+            conteudo = params.get("conteudo", [""])[0].strip()
+            if nota_id:
+                ok  = update_nota(nota_id, titulo or "(sem titulo)", conteudo)
+                msg = "Nota atualizada!" if ok else "Erro ao atualizar a nota."
+            else:
+                msg = "ID invalido."
+            notas = get_notas()
+            return respond(build_notes_page(notas, msg))
+
         elif path == "/delete":
             nota_id = params.get("id", [""])[0]
             if nota_id:
@@ -288,3 +415,4 @@ if __name__ == "__main__":
     print(f"YNot&S rodando em http://127.0.0.1:{port}")
     threading.Timer(0.8, lambda: webbrowser.open(f"http://127.0.0.1:{port}")).start()
     server.serve_forever()
+
