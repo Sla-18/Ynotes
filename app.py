@@ -9,64 +9,84 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 USER_NAME = "Edy"
 USER_PASS  = "tor12.nado"
 
-# ── Configuração Supabase ─────────────────────────────────────
-SUPABASE_URL = "https://lmafzsfqqvrivmqyracj.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxtYWZ6c2ZxcXZyaXZtcXlyYWNqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzEzMzI4NjIsImV4cCI6MjA4NjkwODg2Mn0.c1FfB3xprl9B-EysU94-hOeQwllso-Oarhg48Agi9lU"
+# ── Configuração Firebase (Realtime Database) ──────────────────
+# Vai a https://console.firebase.google.com -> o teu projeto -> Realtime Database
+# Copia o "Database URL" (algo como: https://teu-projeto-default-rtdb.firebaseio.com)
+FIREBASE_URL = os.environ.get("FIREBASE_URL", "https://SEU-PROJETO-default-rtdb.firebaseio.com")
 
-HEADERS = {
-    "apikey": SUPABASE_KEY,
-    "Authorization": f"Bearer {SUPABASE_KEY}",
-    "Content-Type": "application/json",
-    "Prefer": "return=representation"
-}
+# Opcional: se as regras da tua Realtime Database exigirem autenticação,
+# gera um "Database Secret" (Project Settings > Service accounts > Database secrets,
+# nas versões antigas) ou usa um ID Token. Se as regras forem públicas (test mode),
+# podes deixar isto vazio.
+FIREBASE_AUTH = os.environ.get("FIREBASE_AUTH", "")
 
-# ── Funções Supabase ──────────────────────────────────────────
+NOTAS_PATH = "notas"  # nó/coleção onde as notas ficam guardadas
 
-def sb_request(method, endpoint, data=None):
-    url  = f"{SUPABASE_URL}/rest/v1/{endpoint}"
-    body = json.dumps(data).encode() if data else None
-    req  = urllib.request.Request(url, data=body, headers=HEADERS, method=method)
+# ── Funções Firebase ──────────────────────────────────────────
+
+def _url(path_suffix=""):
+    """Monta a URL REST do Firebase, ex: {FIREBASE_URL}/notas.json?auth=..."""
+    url = f"{FIREBASE_URL}/{NOTAS_PATH}{path_suffix}.json"
+    if FIREBASE_AUTH:
+        sep = "&" if "?" in url else "?"
+        url += f"{sep}auth={FIREBASE_AUTH}"
+    return url
+
+
+def _request(method, url, data=None):
+    body = json.dumps(data).encode() if data is not None else None
+    req = urllib.request.Request(url, data=body, method=method,
+                                  headers={"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
-            return json.loads(r.read().decode())
+            raw = r.read().decode()
+            return json.loads(raw) if raw else None
     except urllib.error.HTTPError as e:
-        print(f"[Supabase erro {e.code}]: {e.read().decode()}")
+        print(f"[Firebase erro {e.code}]: {e.read().decode()}")
         return None
     except Exception as e:
-        print(f"[Supabase erro]: {e}")
+        print(f"[Firebase erro]: {e}")
         return None
 
+
 def get_notas():
-    result = sb_request("GET", "notas?order=criada_em.desc&select=*")
-    return result if result else []
+    """Lê todas as notas e devolve como lista de dicts (com 'id' incluído),
+    ordenadas da mais recente para a mais antiga."""
+    result = _request("GET", _url())
+    if not result:
+        return []
+    notas = []
+    for nid, nota in result.items():
+        nota = dict(nota or {})
+        nota["id"] = nid
+        notas.append(nota)
+    notas.sort(key=lambda n: n.get("criada_em", ""), reverse=True)
+    return notas
+
 
 def add_nota(titulo, conteudo):
-    return sb_request("POST", "notas", {"titulo": titulo, "conteudo": conteudo})
+    """Cria uma nova nota com push (gera ID automático, tipo Supabase)."""
+    from datetime import datetime, timezone
+    payload = {
+        "titulo": titulo,
+        "conteudo": conteudo,
+        "criada_em": datetime.now(timezone.utc).isoformat()
+    }
+    return _request("POST", _url(), payload)
+
 
 def update_nota(nota_id, titulo, conteudo):
     """Atualiza titulo e conteudo de uma nota existente via PATCH."""
-    url  = f"{SUPABASE_URL}/rest/v1/notas?id=eq.{nota_id}"
-    body = json.dumps({"titulo": titulo, "conteudo": conteudo}).encode()
-    req  = urllib.request.Request(url, data=body, headers=HEADERS, method="PATCH")
-    try:
-        with urllib.request.urlopen(req, timeout=10) as r:
-            return True
-    except urllib.error.HTTPError as e:
-        print(f"[Supabase update erro {e.code}]: {e.read().decode()}")
-        return False
-    except Exception as e:
-        print(f"[Supabase update erro]: {e}")
-        return False
+    url = _url(f"/{nota_id}")
+    result = _request("PATCH", url, {"titulo": titulo, "conteudo": conteudo})
+    return result is not None
+
 
 def delete_nota(nota_id):
-    url = f"{SUPABASE_URL}/rest/v1/notas?id=eq.{nota_id}"
-    req = urllib.request.Request(url, headers=HEADERS, method="DELETE")
-    try:
-        with urllib.request.urlopen(req, timeout=10):
-            return True
-    except Exception as e:
-        print(f"[Supabase delete erro]: {e}")
-        return False
+    url = _url(f"/{nota_id}")
+    result = _request("DELETE", url)
+    return True  # Firebase devolve 'null' em sucesso, o que passa como None
+
 
 # ── HTML Login ────────────────────────────────────────────────
 
@@ -128,10 +148,9 @@ def build_notes_page(notas, msg=""):
             nid      = n.get("id", "")
             titulo   = (n.get("titulo") or "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
             conteudo = (n.get("conteudo") or "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
-            # Versões para preencher o modal (sem escapar &amp; duplo)
             titulo_js   = (n.get("titulo")   or "").replace("\\","\\\\").replace("`","\\`").replace("$","\\$")
             conteudo_js = (n.get("conteudo") or "").replace("\\","\\\\").replace("`","\\`").replace("$","\\$")
-            data_raw = n.get("criada_em", "")[:16].replace("T", " ")
+            data_raw = (n.get("criada_em", "") or "")[:16].replace("T", " ")
             cards += f"""<div class="note-card">
               <div class="note-card-title">{titulo}</div>
               <div class="note-card-body">{conteudo}</div>
@@ -196,7 +215,6 @@ def build_notes_page(notas, msg=""):
   .btn-edit:hover {{ color:var(--accent2); background:rgba(110,76,255,.15); }}
   .empty {{ grid-column:1/-1; text-align:center; color:var(--muted); font-size:.78rem; padding:52px 0; letter-spacing:.08em; }}
 
-  /* ── Modal de edição ── */
   .modal-overlay {{
     display:none; position:fixed; inset:0; z-index:200;
     background:rgba(10,10,15,.82); backdrop-filter:blur(6px);
@@ -263,7 +281,6 @@ def build_notes_page(notas, msg=""):
   <div class="notes-grid">{cards}</div>
 </main>
 
-<!-- ── Modal de edição ── -->
 <div class="modal-overlay" id="editOverlay">
   <div class="modal">
     <button class="modal-close" onclick="closeEdit()">&#10005;</button>
@@ -293,11 +310,9 @@ def build_notes_page(notas, msg=""):
   function closeEdit() {{
     document.getElementById('editOverlay').classList.remove('open');
   }}
-  // Fecha ao clicar fora do modal
   document.getElementById('editOverlay').addEventListener('click', function(e) {{
     if (e.target === this) closeEdit();
   }});
-  // Fecha com Esc
   document.addEventListener('keydown', function(e) {{
     if (e.key === 'Escape') closeEdit();
   }});
@@ -416,3 +431,4 @@ if __name__ == "__main__":
     threading.Timer(0.8, lambda: webbrowser.open(f"http://127.0.0.1:{port}")).start()
     server.serve_forever()
 
+adiciona firebase
